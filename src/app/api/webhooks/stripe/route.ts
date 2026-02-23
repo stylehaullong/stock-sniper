@@ -2,9 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/db/supabase-server";
 import Stripe from "stripe";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-02-24.acacia",
-});
+function getStripe() {
+  if (!process.env.STRIPE_SECRET_KEY) {
+    throw new Error("STRIPE_SECRET_KEY not configured");
+  }
+  return new Stripe(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: "2025-02-24.acacia" as any,
+  });
+}
 
 const TIER_MAP: Record<string, string> = {
   // Map Stripe price IDs to tier names
@@ -20,7 +25,7 @@ export async function POST(request: NextRequest) {
   let event: Stripe.Event;
 
   try {
-    event = stripe.webhooks.constructEvent(
+    event = getStripe().webhooks.constructEvent(
       body,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET!
@@ -39,7 +44,7 @@ export async function POST(request: NextRequest) {
       const subscriptionId = session.subscription as string;
 
       // Get subscription details to determine tier
-      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+      const subscription = await getStripe().subscriptions.retrieve(subscriptionId);
       const priceId = subscription.items.data[0]?.price.id;
       const tier = TIER_MAP[priceId] || "pro";
 
