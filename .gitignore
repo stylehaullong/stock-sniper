@@ -1,3 +1,6 @@
+# Don't ignore Next.js route groups
+!src/app/(dashboard)/
+!src/app/(auth)/
 # ============================================================
 # Dependencies
 # ============================================================
@@ -68,7 +71,7 @@ Thumbs.db
 # Credentials & Secrets Files
 # ============================================================
 secrets/
-credentials/
+/credentials/
 *.credentials
 *.secret
 service-account*.json
