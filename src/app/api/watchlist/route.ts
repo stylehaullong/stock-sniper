@@ -3,6 +3,7 @@ import { createServerSupabaseClient } from "@/lib/db/supabase-server";
 import { requireAuth, getUserLimits } from "@/lib/auth/helpers";
 import { detectAdapter } from "@/lib/adapters";
 import { z } from "zod";
+import { ensureScheduleExists, removeScheduleIfEmpty } from "@/lib/scheduler";
 
 // Validation schemas
 const addItemSchema = z.object({
@@ -134,6 +135,50 @@ export async function POST(request: NextRequest) {
   // Extract product SKU from URL
   const productSku = adapter.extractProductId(input.product_url);
 
+  // Try to fetch product name from Target's API
+  let productName = input.product_name || "Unknown Product";
+  let productImageUrl: string | null = null;
+  if (productSku && adapter.retailer === "target") {
+    try {
+      const apiKey = "9f36aeafbe60771e321a7cc95a78140772ab3e96";
+      const res = await fetch(
+        `https://redsky.target.com/redsky_aggregations/v1/web/product_summary_with_fulfillment_v1?key=${apiKey}&tcins=${productSku}&store_id=3991&zip=90045&state=CA&latitude=33.98&longitude=-118.47&has_required_store_id=true&channel=WEB&page=%2Fp%2FA-${productSku}`,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            Accept: "application/json",
+            Referer: "https://www.target.com/",
+            Origin: "https://www.target.com",
+          },
+          signal: AbortSignal.timeout(8000),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        // product_summary_with_fulfillment returns array
+        const summaries = data?.data?.product_summaries;
+        if (summaries?.[0]?.item?.product_description?.title) {
+          productName = summaries[0].item.product_description.title;
+        }
+        if (summaries?.[0]?.item?.enrichment?.images?.primary_image_url) {
+          productImageUrl = summaries[0].item.enrichment.images.primary_image_url;
+        }
+        // Also try nested product format
+        if (productName === "Unknown Product") {
+          const product = data?.data?.product;
+          if (product?.item?.product_description?.title) {
+            productName = product.item.product_description.title;
+          }
+          if (product?.item?.enrichment?.images?.primary_image_url) {
+            productImageUrl = product.item.enrichment.images.primary_image_url;
+          }
+        }
+      }
+    } catch {
+      // Non-critical — just use defaults
+    }
+  }
+
   // Insert watchlist item
   const { data: item, error } = await supabase
     .from("watchlist_items")
@@ -142,7 +187,8 @@ export async function POST(request: NextRequest) {
       retailer: adapter.retailer,
       product_url: input.product_url,
       product_sku: productSku,
-      product_name: input.product_name || "Unknown Product",
+      product_name: productName,
+      product_image_url: productImageUrl,
       mode: input.mode,
       poll_interval_seconds: pollInterval,
       max_price: input.max_price || null,
@@ -162,6 +208,9 @@ export async function POST(request: NextRequest) {
     event_type: "stock_check",
     details: { action: "item_added", product_url: input.product_url },
   });
+
+  // Ensure the QStash cron schedule is running
+  await ensureScheduleExists();
 
   return NextResponse.json({ item }, { status: 201 });
 }
@@ -246,6 +295,15 @@ export async function DELETE(request: NextRequest) {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+
+  // Check if any active items remain — if not, remove the cron schedule
+  const { count } = await supabase
+    .from("watchlist_items")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", auth.user.id)
+    .eq("is_active", true);
+
+  await removeScheduleIfEmpty(count || 0);
 
   return NextResponse.json({ success: true });
 }

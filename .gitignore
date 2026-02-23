@@ -118,4 +118,5 @@ Desktop.ini
 *.tgz
 *.tar.gz
 *.zip
-.turbo
+.turbos
+.env*.local
