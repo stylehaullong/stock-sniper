@@ -1,5 +1,13 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
+import {
+  getActivePlaybook,
+  savePlaybook,
+  recordPlaybookSuccess,
+  recordPlaybookFailure,
+  replayPlaybook,
+  recordAgentCheckout,
+} from "./playbook-engine";
 
 // -- Types --
 
@@ -21,7 +29,13 @@ export interface AutoBuyResult {
   total_price?: number;
   failure_reason?: string;
   steps_completed: string[];
+  used_playbook?: boolean;
 }
+
+// Mobile config
+const MOBILE_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
+const MOBILE_VIEWPORT = { width: 390, height: 844 };
 
 // -- Main Entry --
 
@@ -30,216 +44,84 @@ export async function executeAutoBuy(config: AutoBuyConfig): Promise<AutoBuyResu
   let stagehand: Stagehand | null = null;
 
   try {
-    // Step 1: Initialize Stagehand with Browserbase
+    // Step 1: Create browser session
     steps.push("Creating browser session");
-
-    // If we have a saved context, create session with it (skips login)
-    let sessionConfig: any = undefined;
-    if (config.browserbase_context_id) {
-      console.log("[AutoBuy] Using saved context:", config.browserbase_context_id);
-      const BB_API = "https://api.browserbase.com/v1";
-      const sessionRes = await fetch(`${BB_API}/sessions`, {
-        method: "POST",
-        headers: {
-          "x-bb-api-key": process.env.BROWSERBASE_API_KEY!,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          projectId: process.env.BROWSERBASE_PROJECT_ID!,
-          browserSettings: {
-            context: {
-              id: config.browserbase_context_id,
-              persist: true,
-            },
-            solveCaptchas: true,
-            viewport: { width: 390, height: 844 },
-          },
-        }),
-      });
-      if (sessionRes.ok) {
-        const session = await sessionRes.json();
-        sessionConfig = session.id;
-        console.log("[AutoBuy] Session created with context:", session.id);
-      } else {
-        console.log("[AutoBuy] Failed to create session with context, falling back to fresh session");
-      }
-    }
-
-    const stagehandOpts: any = {
-      env: "BROWSERBASE",
-      apiKey: process.env.BROWSERBASE_API_KEY!,
-      projectId: process.env.BROWSERBASE_PROJECT_ID!,
-      experimental: true,
-      verbose: 0,
-      model: {
-        modelName: "anthropic/claude-sonnet-4-20250514",
-        apiKey: process.env.ANTHROPIC_API_KEY!,
-      },
-      browserSettings: {
-        viewport: { width: 390, height: 844 },
-        userAgent:
-          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-      },
-    };
-    if (sessionConfig) {
-      stagehandOpts.browserbaseSessionID = sessionConfig;
-    }
-
-    stagehand = new Stagehand(stagehandOpts);
-    await stagehand.init();
+    const { stagehandInstance, page } = await createBrowserSession(config);
+    stagehand = stagehandInstance;
     steps.push("Browser session created");
 
-    const page = stagehand.context.pages()[0];
+    // Step 2: Verify login
+    steps.push("Checking login session");
+    const loginValid = await checkLogin(page);
+    if (!loginValid) {
+      return {
+        status: "failed",
+        failure_reason: "Login session expired. Please reconnect in Credentials.",
+        steps_completed: steps,
+      };
+    }
+    steps.push("Login session valid");
 
-    // Step 2: Login (skip if using saved context)
-    if (config.browserbase_context_id && sessionConfig) {
-      steps.push("Using saved login session");
-      // Verify we're still logged in by visiting Target
-      await page.goto("https://www.target.com/account", {
-        waitUntil: "domcontentloaded",
-        timeout: 15000,
-      });
-      await delay(2000, 3000);
+    // Step 3: Try playbook-first approach
+    const playbook = await getActivePlaybook(config.retailer);
 
-      const currentUrl = page.url();
-      console.log("[AutoBuy] Account page URL:", currentUrl);
+    if (playbook) {
+      console.log(`[AutoBuy] Found playbook v${playbook.version} for ${config.retailer} (${playbook.success_count} successes)`);
+      steps.push(`Using playbook v${playbook.version}`);
 
-      if (currentUrl.includes("/login") || currentUrl.includes("/sign-in")) {
-        console.log("[AutoBuy] Session expired — falling back to login");
-        steps.push("Session expired — logging in");
-        // Fall through to login
-      } else {
-        steps.push("Login session valid");
-        console.log("[AutoBuy] Logged in via saved context");
-      }
+      const variables: Record<string, string> = {
+        product_url: config.product_url,
+        cvv: config.cvv || "",
+      };
 
-      // If still on login page, need to log in
-      if (currentUrl.includes("/login") || currentUrl.includes("/sign-in")) {
-        const loginResult = await performLogin(stagehand, page, config);
-        if (!loginResult.success) {
+      const replayResult = await replayPlaybook(page, playbook, variables);
+
+      if (replayResult.success) {
+        steps.push(...replayResult.steps_completed);
+        const confirmation = await extractConfirmation(page, stagehand);
+
+        if (confirmation.confirmed) {
+          await recordPlaybookSuccess(playbook.id);
+          steps.push("Order confirmed via playbook!");
           return {
-            status: "failed",
-            failure_reason: `Login failed: ${loginResult.reason}`,
+            status: "success",
+            order_number: confirmation.orderNumber,
+            total_price: confirmation.totalPrice,
             steps_completed: steps,
+            used_playbook: true,
           };
+        } else {
+          console.log("[AutoBuy] Playbook completed but no confirmation found");
+          steps.push("Playbook finished but order not confirmed — falling back to agent");
         }
-        steps.push("Login successful");
+      } else {
+        console.log(`[AutoBuy] Playbook failed at step ${replayResult.failedAt}: ${replayResult.error}`);
+        steps.push(`Playbook failed: ${replayResult.error}`);
+        await recordPlaybookFailure(playbook.id);
       }
+
+      steps.push("Falling back to AI agent");
     } else {
-      // No saved context — full login flow
-      steps.push("Logging into Target");
-      const loginResult = await performLogin(stagehand, page, config);
-      if (!loginResult.success) {
-        return {
-          status: "failed",
-          failure_reason: loginResult.reason || "Login failed",
-          steps_completed: steps,
-        };
-      }
-      steps.push("Login successful");
+      console.log(`[AutoBuy] No playbook for ${config.retailer} — using AI agent`);
+      steps.push("No playbook — using AI agent");
     }
 
-    // Step 3: Navigate to product and add to cart
-    steps.push("Navigating to product page");
-    await page.goto(config.product_url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    await delay(1500, 2500);
+    // Step 4: AI Agent flow (fallback or first run)
+    const agentResult = await runAgentFlow(stagehand, page, config, steps);
 
-    // Check if product is available and get info
-    let productStatus: any = null;
-    try {
-      productStatus = await stagehand.extract({
-        instruction: "Extract product information from this Target product page: the product name, the price, and whether there is an 'Add to cart' button visible. Also check if there is any 'Out of stock', 'Sold out', or 'Temporarily out of stock' message.",
-        schema: z.object({
-          product_name: z.string().describe("The product name/title"),
-          price: z.string().nullable().describe("The product price if visible"),
-          has_add_to_cart_button: z.boolean().describe("Whether an Add to cart button is visible"),
-          out_of_stock_message: z.string().nullable().describe("Any explicit out of stock or sold out message, null if none found"),
-        }),
-      });
-      console.log("[AutoBuy] Product status:", JSON.stringify(productStatus));
-    } catch (err: any) {
-      console.log("[AutoBuy] Extract failed, proceeding to try add to cart anyway:", err.message);
-    }
-
-    // Only block if there's an EXPLICIT out of stock message
-    if (productStatus?.out_of_stock_message && !productStatus?.has_add_to_cart_button) {
-      return {
-        status: "out_of_stock",
-        failure_reason: productStatus.out_of_stock_message,
-        steps_completed: steps,
-      };
-    }
-
-    // Price check
-    if (config.max_price && productStatus?.price) {
-      const price = parseFloat(productStatus.price.replace(/[^0-9.]/g, ""));
-      if (price > config.max_price) {
-        return {
-          status: "failed",
-          failure_reason: `Price $${price} exceeds max price $${config.max_price}`,
-          steps_completed: steps,
-        };
-      }
-    }
-
-    // Try to add to cart — attempt multiple approaches
-    steps.push("Adding to cart");
-    let addedToCart = false;
-
-    try {
-      await stagehand.act("click the 'Add to cart' button on the product page");
-      addedToCart = true;
-    } catch {
-      // Try alternative selectors
+    // Step 5: If agent succeeded, record and save the playbook
+    if (agentResult.status === "success") {
       try {
-        await stagehand.act("find and click any button that says 'Add to cart' or 'Add to Cart'");
-        addedToCart = true;
-      } catch {
-        console.log("[AutoBuy] Could not click add to cart button");
+        console.log("[AutoBuy] Saving playbook from successful agent run");
+        const { steps: playbookSteps } = await recordAgentCheckout(stagehand, page, { cvv: config.cvv });
+        await savePlaybook(config.retailer, playbookSteps);
+        steps.push("Playbook saved for future runs");
+      } catch (err: any) {
+        console.log("[AutoBuy] Failed to save playbook:", err.message);
       }
     }
 
-    if (!addedToCart) {
-      return {
-        status: "out_of_stock",
-        failure_reason: "Could not find or click 'Add to cart' button — product may be unavailable",
-        steps_completed: steps,
-      };
-    }
-
-    await delay(2000, 3000);
-
-    // Handle any popups (warranty, protection plans, etc.)
-    try {
-      await stagehand.act({
-        action: "if there is a popup or modal about protection plans, warranties, or accessories, close it or click 'No thanks' or 'Skip'",
-        timeoutMs: 5000,
-      });
-    } catch {
-      // No popup — that's fine
-    }
-
-    // Brief check if cart was updated — don't block on failure
-    try {
-      const cartCheck = await stagehand.extract({
-        instruction: "Was the item added to cart? Look for 'Added to cart' confirmation, cart count change, or any error like 'couldn't add to cart'.",
-        schema: z.object({
-          added: z.boolean().describe("Whether the item appears to have been added"),
-          error: z.string().nullable().describe("Any error message"),
-        }),
-      });
-      if (cartCheck.error && !cartCheck.added) {
-        console.log("[AutoBuy] Cart check reports error:", cartCheck.error);
-      }
-    } catch {
-      // Proceed anyway — we'll find out at checkout
-    }
-    steps.push("Added to cart");
-
-    // Step 4: Checkout
-    steps.push("Starting checkout");
-    const checkoutResult = await performCheckout(stagehand, page, config, steps);
-    return checkoutResult;
+    return agentResult;
 
   } catch (error: any) {
     console.error("[AutoBuy] Fatal error:", error);
@@ -255,100 +137,176 @@ export async function executeAutoBuy(config: AutoBuyConfig): Promise<AutoBuyResu
   }
 }
 
-// -- Login Flow --
+// -- Browser Session --
 
-async function performLogin(
-  stagehand: Stagehand,
-  page: any,
-  config: AutoBuyConfig
-): Promise<{ success: boolean; reason?: string }> {
-  try {
-    await page.goto("https://www.target.com/login", {
-      waitUntil: "domcontentloaded",
-      timeout: 15000,
-    });
-    await delay(3000, 4000);
+async function createBrowserSession(config: AutoBuyConfig): Promise<{
+  stagehandInstance: Stagehand;
+  page: any;
+}> {
+  let sessionId: string | undefined;
 
-    // Use the agent for the entire login flow — it handles
-    // CAPTCHAs, two-step forms, popups, and unexpected pages better
-    const agent = stagehand.agent({
-      mode: "hybrid",
-      model: {
-        modelName: "anthropic/claude-sonnet-4-20250514",
-        apiKey: process.env.ANTHROPIC_API_KEY!,
+  if (config.browserbase_context_id) {
+    const BB_API = "https://api.browserbase.com/v1";
+    const res = await fetch(`${BB_API}/sessions`, {
+      method: "POST",
+      headers: {
+        "x-bb-api-key": process.env.BROWSERBASE_API_KEY!,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({
+        projectId: process.env.BROWSERBASE_PROJECT_ID!,
+        browserSettings: {
+          context: { id: config.browserbase_context_id, persist: true },
+          solveCaptchas: true,
+          viewport: MOBILE_VIEWPORT,
+        },
+      }),
     });
-
-    const loginResult = await agent.execute({
-      instruction: `Log into Target.com with these credentials:
-       Email: ${config.username}
-       Password: ${config.password}
-       
-       Steps:
-       1. Find the email/username field and type the email
-       2. Find the password field and type the password (it may appear after clicking Continue, or may already be visible)
-       3. Click the Sign In button
-       4. If you see a verification code / MFA prompt, stop — do not try to solve it
-       5. Wait for the page to redirect away from the login page
-       
-       Stop once you are logged in (URL no longer contains /login).`,
-      maxSteps: 15,
-    });
-
-    console.log("[AutoBuy] Login agent result:", JSON.stringify({ success: loginResult.success, message: loginResult.message, completed: loginResult.completed }));
-    
-    await delay(2000, 3000);
-
-    // Check URL to verify login
-    const currentUrl = page.url();
-    console.log("[AutoBuy] Current URL after login:", currentUrl);
-    
-    // Check for MFA/verification page
-    if (currentUrl.includes("verify") || currentUrl.includes("mfa") || currentUrl.includes("challenge")) {
-      return { success: false, reason: "Target is requiring MFA/verification. This usually happens when logging in from an unfamiliar location. Try enabling Browserbase proxies from your region, or log into Target from a regular browser first to 'trust' the device." };
+    if (res.ok) {
+      const session = await res.json();
+      sessionId = session.id;
     }
-
-    const loggedIn = !currentUrl.includes("/login") && !currentUrl.includes("/account/sign-in");
-
-    if (!loggedIn) {
-      try {
-        const loginStatus = await stagehand.extract({
-          instruction: "Is there a login error message visible on this page?",
-          schema: z.object({
-            has_error: z.boolean().describe("Whether there is a login error"),
-            error_message: z.string().nullable().describe("The error message"),
-          }),
-        });
-        if (loginStatus.has_error) {
-          return { success: false, reason: loginStatus.error_message || "Login failed" };
-        }
-      } catch {}
-      return { success: false, reason: "Still on login page after agent execution" };
-    }
-
-    return { success: true };
-  } catch (error: any) {
-    return { success: false, reason: `Login error: ${error.message}` };
   }
+
+  const opts: any = {
+    env: "BROWSERBASE",
+    apiKey: process.env.BROWSERBASE_API_KEY!,
+    projectId: process.env.BROWSERBASE_PROJECT_ID!,
+    experimental: true,
+    verbose: 0,
+    model: {
+      modelName: "anthropic/claude-sonnet-4-20250514",
+      apiKey: process.env.ANTHROPIC_API_KEY!,
+    },
+    browserSettings: {
+      viewport: MOBILE_VIEWPORT,
+      userAgent: MOBILE_UA,
+    },
+  };
+
+  if (sessionId) opts.browserbaseSessionID = sessionId;
+
+  const stagehandInstance = new Stagehand(opts);
+  await stagehandInstance.init();
+  const page = stagehandInstance.context.pages()[0];
+
+  return { stagehandInstance, page };
 }
 
-// -- Checkout Flow --
+// -- Login Check --
 
-async function performCheckout(
+async function checkLogin(page: any): Promise<boolean> {
+  await page.goto("https://www.target.com/account", {
+    waitUntil: "domcontentloaded",
+    timeoutMs: 15000,
+  });
+  await delay(2000, 2500);
+  const url = page.url();
+  return !url.includes("/login") && !url.includes("/sign-in");
+}
+
+// -- AI Agent Flow (fallback) --
+
+async function runAgentFlow(
   stagehand: Stagehand,
   page: any,
   config: AutoBuyConfig,
   steps: string[]
 ): Promise<AutoBuyResult> {
   try {
-    // Go to cart
-    await page.goto("https://www.target.com/cart", {
-      waitUntil: "domcontentloaded",
-      timeout: 15000,
-    });
-    await delay(2000, 3000);
+    // Navigate to product
+    steps.push("Navigating to product");
+    await page.goto(config.product_url, { waitUntil: "domcontentloaded", timeoutMs: 15000 });
+    await delay(1500, 2000);
 
-    // Use agent for the entire checkout flow
+    // Quick out-of-stock check via page text
+    const bodyText: string = await page.locator("body").innerText().catch(() => "");
+    const oosPatterns = [/out of stock/i, /sold out/i, /temporarily unavailable/i, /currently unavailable/i];
+    if (oosPatterns.some((p) => p.test(bodyText))) {
+      return {
+        status: "out_of_stock",
+        failure_reason: "Product is out of stock",
+        steps_completed: steps,
+      };
+    }
+
+    // Price check
+    if (config.max_price) {
+      const priceMatch = bodyText.match(/\$(\d+\.?\d*)/);
+      if (priceMatch) {
+        const price = parseFloat(priceMatch[1]);
+        if (price > config.max_price) {
+          return {
+            status: "failed",
+            failure_reason: `Price $${price} exceeds max $${config.max_price}`,
+            steps_completed: steps,
+          };
+        }
+      }
+    }
+
+    // Add to cart — try direct selectors first, then AI
+    steps.push("Adding to cart");
+    let addedToCart = false;
+
+    const cartSelectors = [
+      'button[data-test="addToCartButton"]',
+      'button[data-test="shipItButton"]',
+      '[data-test="orderPickupButton"]',
+      'button:has-text("Add to cart")',
+    ];
+
+    for (const sel of cartSelectors) {
+      try {
+        const el = page.locator(sel).first();
+        await el.waitFor({ timeout: 2000 });
+        await el.click();
+        addedToCart = true;
+        console.log(`[AutoBuy] Clicked add to cart via: ${sel}`);
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    if (!addedToCart) {
+      try {
+        await stagehand.act("click the 'Add to cart' button");
+        addedToCart = true;
+        console.log("[AutoBuy] Clicked add to cart via AI");
+      } catch {}
+    }
+
+    if (!addedToCart) {
+      return {
+        status: "out_of_stock",
+        failure_reason: "Could not find Add to cart button",
+        steps_completed: steps,
+      };
+    }
+
+    await delay(2000, 2500);
+
+    // Dismiss popups
+    for (const sel of ['button:has-text("No thanks")', 'button:has-text("View cart & check out")', 'button[aria-label="close"]']) {
+      try {
+        await page.locator(sel).first().click({ timeout: 1500 });
+        break;
+      } catch {}
+    }
+
+    steps.push("Added to cart");
+    steps.push("Starting checkout");
+
+    // Go to cart
+    await page.goto("https://www.target.com/cart", { waitUntil: "domcontentloaded", timeoutMs: 15000 });
+    await delay(1500, 2000);
+
+    // Run checkout agent
+    const cvvInstruction = config.cvv
+      ? `6. If a "Confirm CVV" dialog appears, type the CVV code: ${config.cvv} into the CVV field and click "Confirm"`
+      : `6. If a "Confirm CVV" dialog appears, STOP — no CVV was provided`;
+
     const agent = stagehand.agent({
       mode: "hybrid",
       model: {
@@ -357,118 +315,109 @@ async function performCheckout(
       },
     });
 
-    const cvvInstruction = config.cvv 
-      ? `6. If a "Confirm CVV" dialog appears, type the CVV code: ${config.cvv} into the CVV field and click "Confirm"`
-      : `6. If a "Confirm CVV" dialog appears, STOP — no CVV was provided`;
+    await agent.execute({
+      instruction: `Complete Target checkout on this cart page:
 
-    const checkoutResult = await agent.execute({
-      instruction: `You are on Target's cart page on mobile. Complete the checkout process:
-
-1. Click the "Check out" or "Checkout" button to start checkout
-2. If asked to choose shipping or delivery method, select the cheapest/default option and click "Save and continue" or "Continue"
-3. If asked about payment, the saved payment method should already be selected — just click "Save and continue" or "Continue"  
-4. On the order review page, look for "Place your order" button and click it
-5. After placing the order, look for the order confirmation number
+1. Click "Check out" or "Checkout" button
+2. If shipping/delivery step appears, click "Save and continue"
+3. If payment step appears, click "Save and continue" (use saved payment)
+4. Click "Place your order"
+5. Wait for order confirmation
 ${cvvInstruction}
 
-IMPORTANT RULES:
-- Do NOT change the shipping address — use whatever is already saved
-- Do NOT change the payment method — use whatever is already saved  
-- If you see a "Place your order" button, click it immediately
-- If you see an order confirmation page with an order number, STOP — you are done
-- If you see a login page, STOP — the session has expired
-- If you see an error message, STOP
-- Do not click on any promotional offers, upsells, or "add more items"
-- If a step asks you to "Continue" or "Save and continue", click that button
-
-The goal is to complete checkout as fast as possible using saved shipping and payment info.`,
+RULES: Do NOT change address or payment. Click "Place your order" when visible. STOP on confirmation, login, or error. Ignore promos/upsells.`,
       maxSteps: 20,
     });
 
-    console.log("[AutoBuy] Checkout agent completed");
     steps.push("Checkout agent completed");
+    await delay(3000, 4000);
 
-    await delay(3000, 5000);
-
-    // Check the final page state
-    const finalUrl = page.url();
-    console.log("[AutoBuy] Final URL:", finalUrl);
-
-    // Use stagehand to analyze the final page
-    let pageAnalysis: any = {};
-    try {
-      pageAnalysis = await stagehand.extract({
-        instruction: "Analyze this page. What page are you on? Is there an order confirmation with an order number? Is there an error message? What does the page say? Describe everything you see.",
-        schema: z.object({
-          page_type: z.string().describe("What type of page is this: cart, checkout, order-confirmation, login, error, product, homepage, or other"),
-          visible_text_summary: z.string().describe("A brief summary of the main text visible on the page"),
-          has_order_confirmation: z.boolean().describe("Is there an order confirmation or thank you message?"),
-          order_number: z.string().nullable().describe("Order/confirmation number if visible"),
-          total_price: z.string().nullable().describe("Order total if visible"),
-          error_message: z.string().nullable().describe("Any error message visible on the page"),
-          main_button_text: z.string().nullable().describe("Text of the main action button if any"),
-        }),
-      });
-      console.log("[AutoBuy] Page analysis:", JSON.stringify(pageAnalysis));
-    } catch (err: any) {
-      console.log("[AutoBuy] Failed to analyze page:", err.message);
-    }
-
-    // Check for order confirmation
-    if (pageAnalysis.has_order_confirmation || 
-        finalUrl.includes("order-confirmation")) {
+    // Check confirmation
+    const confirmation = await extractConfirmation(page, stagehand);
+    if (confirmation.confirmed) {
       steps.push("Order confirmed!");
       return {
         status: "success",
-        order_number: pageAnalysis.order_number || "Unknown",
-        total_price: pageAnalysis.total_price
-          ? parseFloat(pageAnalysis.total_price.replace(/[^0-9.]/g, ""))
-          : undefined,
+        order_number: confirmation.orderNumber,
+        total_price: confirmation.totalPrice,
         steps_completed: steps,
+        used_playbook: false,
       };
     }
 
-    // Check for specific errors
-    if (pageAnalysis.error_message) {
-      return {
-        status: "carted",
-        failure_reason: `Checkout error: ${pageAnalysis.error_message}`,
-        steps_completed: steps,
-      };
-    }
-
-    // Check if still in checkout/cart
-    if (finalUrl.includes("/cart") || finalUrl.includes("/checkout")) {
-      return {
-        status: "carted",
-        failure_reason: `Checkout did not complete. Page: ${pageAnalysis.page_type || "unknown"}. ${pageAnalysis.visible_text_summary || ""} Main button: ${pageAnalysis.main_button_text || "none"}`,
-        steps_completed: steps,
-      };
-    }
-
-    // Check for login redirect (session expired)
+    const finalUrl = page.url();
     if (finalUrl.includes("/login")) {
-      return {
-        status: "carted",
-        failure_reason: "Session expired during checkout — item is in cart. Please reconnect credentials.",
-        steps_completed: steps,
-      };
+      return { status: "carted", failure_reason: "Session expired during checkout.", steps_completed: steps };
     }
 
-    // Unknown state
     return {
       status: "carted",
-      failure_reason: `Checkout ended on unexpected page: ${finalUrl}`,
+      failure_reason: `Checkout did not complete. Final URL: ${finalUrl}`,
       steps_completed: steps,
     };
 
   } catch (error: any) {
     return {
       status: "failed",
-      failure_reason: `Checkout error: ${error.message}`,
+      failure_reason: `Agent error: ${error.message}`,
       steps_completed: steps,
     };
   }
+}
+
+// -- Confirmation Extraction --
+
+async function extractConfirmation(
+  page: any,
+  stagehand: Stagehand
+): Promise<{ confirmed: boolean; orderNumber?: string; totalPrice?: number }> {
+  const finalUrl = page.url();
+
+  // Fast: URL check
+  if (finalUrl.includes("order-confirmation")) {
+    const text: string = await page.locator("body").innerText().catch(() => "");
+    const orderMatch = text.match(/order\s*#?\s*(\d{5,})/i) || text.match(/confirmation\s*#?\s*(\d{5,})/i);
+    const totalMatch = text.match(/total[:\s]*\$(\d+\.?\d*)/i);
+    return {
+      confirmed: true,
+      orderNumber: orderMatch?.[1],
+      totalPrice: totalMatch ? parseFloat(totalMatch[1]) : undefined,
+    };
+  }
+
+  // Check page text for confirmation keywords
+  const text: string = await page.locator("body").innerText().catch(() => "");
+  const confirmPatterns = [/thanks for your order/i, /order has been placed/i, /order confirmed/i];
+  if (confirmPatterns.some((p) => p.test(text))) {
+    const orderMatch = text.match(/order\s*#?\s*(\d{5,})/i) || text.match(/confirmation\s*#?\s*(\d{5,})/i);
+    const totalMatch = text.match(/total[:\s]*\$(\d+\.?\d*)/i);
+    return {
+      confirmed: true,
+      orderNumber: orderMatch?.[1],
+      totalPrice: totalMatch ? parseFloat(totalMatch[1]) : undefined,
+    };
+  }
+
+  // AI fallback
+  try {
+    const analysis = await stagehand.extract({
+      instruction: "Is this an order confirmation page? Look for order number, 'thanks for your order', or confirmation message.",
+      schema: z.object({
+        is_confirmed: z.boolean().describe("Is this an order confirmation page?"),
+        order_number: z.string().nullable().describe("Order number if visible"),
+        total: z.string().nullable().describe("Order total if visible"),
+      }),
+    });
+    if (analysis.is_confirmed) {
+      return {
+        confirmed: true,
+        orderNumber: analysis.order_number || undefined,
+        totalPrice: analysis.total ? parseFloat(analysis.total.replace(/[^0-9.]/g, "")) : undefined,
+      };
+    }
+  } catch {}
+
+  return { confirmed: false };
 }
 
 // -- Helpers --

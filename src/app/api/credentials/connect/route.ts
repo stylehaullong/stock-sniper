@@ -115,7 +115,7 @@ async function autoFillLogin(
     const page = stagehand.context.pages()[0];
 
     // Navigate to login page — mobile UA set at session level
-    await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeoutMs: 15000 });
     await new Promise((r) => setTimeout(r, 3000));
     console.log("[Connect] Login page loaded (mobile mode)");
 
