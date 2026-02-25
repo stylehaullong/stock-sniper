@@ -98,6 +98,8 @@ async function autoFillLogin(
   const loginUrl = loginUrls[retailer] || loginUrls.target;
 
   try {
+    console.log("[Connect] Starting auto-fill for session:", sessionId);
+    
     const stagehand = new Stagehand({
       env: "BROWSERBASE",
       apiKey: process.env.BROWSERBASE_API_KEY!,
@@ -110,17 +112,18 @@ async function autoFillLogin(
       browserbaseSessionID: sessionId,
     });
 
+    console.log("[Connect] Calling stagehand.init()...");
     await stagehand.init();
+    console.log("[Connect] Stagehand initialized");
+    
     const page = stagehand.context.pages()[0];
-
-    // Small delay to ensure session is fully ready
-    await new Promise((r) => setTimeout(r, 1500));
+    console.log("[Connect] Got page, current URL:", page.url());
 
     // Navigate to login page — mobile UA set at session level
     console.log("[Connect] Navigating to:", loginUrl);
     await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeoutMs: 15000 });
     await new Promise((r) => setTimeout(r, 3000));
-    console.log("[Connect] Login page loaded (mobile mode)");
+    console.log("[Connect] Login page loaded, URL:", page.url());
 
     // Use Stagehand agent to fill credentials
     const agent = stagehand.agent({
