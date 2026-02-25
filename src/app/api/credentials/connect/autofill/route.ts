@@ -74,14 +74,11 @@ export async function POST(req: NextRequest) {
     // Set mobile user agent to bypass bot detection
     const MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
     try {
-      const cdpSession = await page.context().newCDPSession(page);
+      const cdpSession = await (stagehand.context as any).newCDPSession(page);
       await cdpSession.send("Network.setUserAgentOverride", { userAgent: MOBILE_UA });
       console.log("[AutoFill] Mobile UA set via CDP");
     } catch (err: any) {
-      console.log("[AutoFill] Could not set UA via CDP, trying page method:", err.message);
-      try {
-        await page.setExtraHTTPHeaders({ "User-Agent": MOBILE_UA });
-      } catch {}
+      console.log("[AutoFill] CDP UA override failed:", err.message);
     }
 
     // Navigate to login page
