@@ -102,7 +102,6 @@ async function autoFillLogin(
       env: "BROWSERBASE",
       apiKey: process.env.BROWSERBASE_API_KEY!,
       projectId: process.env.BROWSERBASE_PROJECT_ID!,
-      experimental: true,
       verbose: 0,
       model: {
         modelName: "anthropic/claude-sonnet-4-20250514",
@@ -114,7 +113,11 @@ async function autoFillLogin(
     await stagehand.init();
     const page = stagehand.context.pages()[0];
 
+    // Small delay to ensure session is fully ready
+    await new Promise((r) => setTimeout(r, 1500));
+
     // Navigate to login page — mobile UA set at session level
+    console.log("[Connect] Navigating to:", loginUrl);
     await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeoutMs: 15000 });
     await new Promise((r) => setTimeout(r, 3000));
     console.log("[Connect] Login page loaded (mobile mode)");
