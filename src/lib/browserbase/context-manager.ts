@@ -65,6 +65,10 @@ export async function createSessionWithContext(contextId: string): Promise<{
         },
         solveCaptchas: true,
         viewport: MOBILE_VIEWPORT,
+        fingerprint: {
+          devices: ["mobile"],
+          operatingSystems: ["ios"],
+        },
       },
     }),
   });

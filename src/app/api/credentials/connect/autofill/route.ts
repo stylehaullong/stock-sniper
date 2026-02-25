@@ -71,17 +71,7 @@ export async function POST(req: NextRequest) {
 
     const page = stagehand.context.pages()[0];
 
-    // Set mobile user agent to bypass bot detection
-    const MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
-    try {
-      const cdpSession = await (stagehand.context as any).newCDPSession(page);
-      await cdpSession.send("Network.setUserAgentOverride", { userAgent: MOBILE_UA });
-      console.log("[AutoFill] Mobile UA set via CDP");
-    } catch (err: any) {
-      console.log("[AutoFill] CDP UA override failed:", err.message);
-    }
-
-    // Navigate to login page
+    // Navigate to login page (mobile UA set via Browserbase fingerprint at session level)
     console.log("[AutoFill] Navigating to:", loginUrl);
     await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeoutMs: 15000 });
     await new Promise((r) => setTimeout(r, 3000));

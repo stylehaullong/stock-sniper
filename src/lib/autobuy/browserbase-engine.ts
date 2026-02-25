@@ -159,6 +159,10 @@ async function createBrowserSession(config: AutoBuyConfig): Promise<{
           context: { id: config.browserbase_context_id, persist: true },
           solveCaptchas: true,
           viewport: MOBILE_VIEWPORT,
+          fingerprint: {
+            devices: ["mobile"],
+            operatingSystems: ["ios"],
+          },
         },
       }),
     });
