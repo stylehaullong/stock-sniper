@@ -145,6 +145,7 @@ async function createBrowserSession(config: AutoBuyConfig): Promise<{
   let sessionId: string | undefined;
 
   if (config.browserbase_context_id) {
+    // Pre-create session with context + mobile settings via Browserbase API
     const BB_API = "https://api.browserbase.com/v1";
     const res = await fetch(`${BB_API}/sessions`, {
       method: "POST",
@@ -164,6 +165,7 @@ async function createBrowserSession(config: AutoBuyConfig): Promise<{
     if (res.ok) {
       const session = await res.json();
       sessionId = session.id;
+      console.log("[AutoBuy] Pre-created session with context:", sessionId);
     }
   }
 
@@ -171,19 +173,25 @@ async function createBrowserSession(config: AutoBuyConfig): Promise<{
     env: "BROWSERBASE",
     apiKey: process.env.BROWSERBASE_API_KEY!,
     projectId: process.env.BROWSERBASE_PROJECT_ID!,
-    experimental: true,
     verbose: 0,
     model: {
       modelName: "anthropic/claude-sonnet-4-20250514",
       apiKey: process.env.ANTHROPIC_API_KEY!,
     },
-    browserSettings: {
-      viewport: MOBILE_VIEWPORT,
-      userAgent: MOBILE_UA,
-    },
   };
 
-  if (sessionId) opts.browserbaseSessionID = sessionId;
+  if (sessionId) {
+    // Connect to the pre-created session — don't pass session create params
+    opts.browserbaseSessionID = sessionId;
+  } else {
+    // No context — create a new session with mobile settings
+    opts.browserbaseSessionCreateParams = {
+      projectId: process.env.BROWSERBASE_PROJECT_ID!,
+      browserSettings: {
+        viewport: MOBILE_VIEWPORT,
+      },
+    };
+  }
 
   const stagehandInstance = new Stagehand(opts);
   await stagehandInstance.init();
