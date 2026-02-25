@@ -71,28 +71,37 @@ export function decrypt(
 
 /**
  * Encrypts retailer credentials for storage.
- * Stores username and password as a single encrypted blob.
+ * Stores username, password, and optionally CVV as encrypted blobs.
  */
 export function encryptCredentials(
   username: string,
   password: string,
-  userId: string
-): { encrypted_username: string; encrypted_password: string; encryption_iv: string } {
+  userId: string,
+  cvv?: string
+): { encrypted_username: string; encrypted_password: string; encryption_iv: string; encrypted_cvv?: string } {
   const usernameResult = encrypt(username, userId);
   const passwordResult = encrypt(password, userId);
 
-  // Store both IVs and auth tags together
-  const ivData = JSON.stringify({
+  const ivData: Record<string, string> = {
     username_iv: usernameResult.iv,
     username_auth: usernameResult.authTag,
     password_iv: passwordResult.iv,
     password_auth: passwordResult.authTag,
-  });
+  };
+
+  let encrypted_cvv: string | undefined;
+  if (cvv) {
+    const cvvResult = encrypt(cvv, userId);
+    ivData.cvv_iv = cvvResult.iv;
+    ivData.cvv_auth = cvvResult.authTag;
+    encrypted_cvv = cvvResult.encrypted;
+  }
 
   return {
     encrypted_username: usernameResult.encrypted,
     encrypted_password: passwordResult.encrypted,
-    encryption_iv: ivData,
+    encryption_iv: JSON.stringify(ivData),
+    ...(encrypted_cvv ? { encrypted_cvv } : {}),
   };
 }
 
@@ -103,8 +112,9 @@ export function decryptCredentials(
   encrypted_username: string,
   encrypted_password: string,
   encryption_iv: string,
-  userId: string
-): { username: string; password: string } {
+  userId: string,
+  encrypted_cvv?: string | null
+): { username: string; password: string; cvv?: string } {
   const ivData = JSON.parse(encryption_iv);
 
   const username = decrypt(
@@ -121,5 +131,10 @@ export function decryptCredentials(
     userId
   );
 
-  return { username, password };
+  let cvv: string | undefined;
+  if (encrypted_cvv && ivData.cvv_iv && ivData.cvv_auth) {
+    cvv = decrypt(encrypted_cvv, ivData.cvv_iv, ivData.cvv_auth, userId);
+  }
+
+  return { username, password, ...(cvv ? { cvv } : {}) };
 }

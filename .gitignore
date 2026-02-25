@@ -123,3 +123,4 @@ Desktop.ini
 *.zip
 .turbos
 .env*.local
+.browser-profiles

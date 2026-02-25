@@ -2,14 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Receiver } from "@upstash/qstash";
 import { createAdminClient } from "@/lib/db/supabase-server";
 import { Redis } from "@upstash/redis";
-
-const API_KEY = "9f36aeafbe60771e321a7cc95a78140772ab3e96";
-const FETCH_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  Accept: "application/json",
-  Referer: "https://www.target.com/",
-  Origin: "https://www.target.com",
-};
+import { checkTargetStock, extractTcin } from "@/lib/target/stock-check";
 
 // Max items to check per cron invocation (prevents timeout)
 const MAX_ITEMS_PER_RUN = 50;
@@ -133,7 +126,7 @@ export async function POST(request: NextRequest) {
         // Reuse result if same TCIN already checked in this run
         let result = checkedTcins.get(tcin);
         if (!result) {
-          result = await checkTargetStock(tcin);
+          result = await checkTargetStock(tcin, item.product_url);
           checkedTcins.set(tcin, result);
         }
 
@@ -258,88 +251,4 @@ async function triggerAutoBuy(item: any, supabase: any) {
     retries: 1,
     deduplicationId: `autobuy-${item.id}-${Math.floor(Date.now() / 60000)}`, // Dedup within same minute
   });
-}
-
-// -- Target Stock Check --
-
-function extractTcin(url: string): string | null {
-  const m = url.match(/A-(\d+)/);
-  if (m) return m[1];
-  const p = url.match(/preselect=(\d+)/);
-  if (p) return p[1];
-  return null;
-}
-
-async function tryFetch(url: string): Promise<any | null> {
-  try {
-    const res = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch { return null; }
-}
-
-async function checkTargetStock(tcin: string) {
-  const summaryUrl =
-    `https://redsky.target.com/redsky_aggregations/v1/web/product_summary_with_fulfillment_v1` +
-    `?key=${API_KEY}&tcins=${tcin}&store_id=3991&zip=90045&state=CA&latitude=33.98&longitude=-118.47` +
-    `&has_required_store_id=true&channel=WEB&page=%2Fp%2FA-${tcin}`;
-
-  let data = await tryFetch(summaryUrl);
-  if (data) {
-    const parsed = parseSummary(data, tcin);
-    if (parsed) return parsed;
-  }
-
-  const fulfillUrl =
-    `https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1` +
-    `?key=${API_KEY}&tcin=${tcin}&store_id=3991&store_positions_store_id=3991` +
-    `&has_store_positions_store_id=true&zip=90045&state=CA&latitude=33.98&longitude=-118.47` +
-    `&pricing_store_id=3991&has_pricing_store_id=true&is_bot=false`;
-
-  data = await tryFetch(fulfillUrl);
-  if (data) {
-    const parsed = parseFulfillment(data, tcin);
-    if (parsed) return parsed;
-  }
-
-  throw new Error(`All Target API endpoints failed for TCIN ${tcin}`);
-}
-
-function parseSummary(data: any, tcin: string) {
-  const summaries = data?.data?.product_summaries;
-  if (!summaries?.[0]) {
-    if (data?.data?.product) return parseFulfillment(data, tcin);
-    return null;
-  }
-  const p = summaries[0];
-  const name = p?.item?.product_description?.title || `Target Product ${tcin}`;
-  const img = p?.item?.enrichment?.images?.primary_image_url || null;
-  const price = p?.price?.current_retail || p?.price?.reg_retail || null;
-  const ship = p?.fulfillment?.shipping_options?.availability_status;
-  const pickup = p?.fulfillment?.store_options?.[0]?.order_pickup?.availability_status;
-  const inStock = isAvailable(ship) || isAvailable(pickup);
-  return { in_stock: inStock, price, product_name: name, product_image_url: img, raw_status: fmtStatus(ship, pickup) };
-}
-
-function parseFulfillment(data: any, tcin: string) {
-  const product = data?.data?.product;
-  if (!product) return null;
-  const name = product?.item?.product_description?.title || `Target Product ${tcin}`;
-  const img = product?.item?.enrichment?.images?.primary_image_url || null;
-  const price = product?.price?.current_retail || product?.price?.reg_retail || null;
-  const ship = product?.fulfillment?.shipping_options?.availability_status;
-  const pickups = product?.fulfillment?.store_options?.map((s: any) => s?.order_pickup?.availability_status) || [];
-  const inStock = isAvailable(ship) || pickups.some(isAvailable);
-  return { in_stock: inStock, price, product_name: name, product_image_url: img, raw_status: fmtStatus(ship, pickups[0]) };
-}
-
-function isAvailable(status: string | undefined): boolean {
-  return status === "IN_STOCK" || status === "LIMITED_STOCK";
-}
-
-function fmtStatus(ship?: string, pickup?: string): string {
-  const parts: string[] = [];
-  if (ship) parts.push(`Ship: ${ship}`);
-  if (pickup) parts.push(`Pickup: ${pickup}`);
-  return parts.join(" | ") || "Unknown";
 }

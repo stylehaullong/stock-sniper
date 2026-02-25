@@ -52,8 +52,10 @@ export async function POST(request: NextRequest) {
   const parsed = addItemSchema.safeParse(body);
 
   if (!parsed.success) {
+    const flat = parsed.error.flatten();
+    const fieldErrs = Object.entries(flat.fieldErrors).map(([k, v]) => `${k}: ${(v as string[]).join(", ")}`).join("; ");
     return NextResponse.json(
-      { error: "Invalid input", details: parsed.error.flatten() },
+      { error: `Invalid input${fieldErrs ? ": " + fieldErrs : ""}`, details: flat },
       { status: 400 }
     );
   }

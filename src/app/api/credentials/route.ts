@@ -8,6 +8,7 @@ const saveCredentialSchema = z.object({
   retailer: z.enum(["target", "walmart", "pokemon_center"]),
   username: z.string().min(1, "Username is required"),
   password: z.string().min(1, "Password is required"),
+  cvv: z.string().optional(),
 });
 
 // GET /api/credentials - List user's saved credentials (metadata only, never the actual creds)
@@ -19,10 +20,13 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("retailer_credentials")
-    .select("id, retailer, last_validated_at, is_valid, created_at, updated_at")
+    .select("id, retailer, last_validated_at, is_valid, connection_status, connected_at, created_at, updated_at")
     .eq("user_id", auth.user.id);
 
+  console.log("[Credentials GET] Raw data:", JSON.stringify(data));
+
   if (error) {
+    console.log("[Credentials GET] Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
@@ -44,10 +48,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { retailer, username, password } = parsed.data;
+  const { retailer, username, password, cvv } = parsed.data;
 
   // Encrypt credentials with user-specific key
-  const encrypted = encryptCredentials(username, password, auth.user.id);
+  const encrypted = encryptCredentials(username, password, auth.user.id, cvv);
 
   const supabase = await createServerSupabaseClient();
 
@@ -58,17 +62,19 @@ export async function POST(request: NextRequest) {
       {
         user_id: auth.user.id,
         retailer,
+        label: "default",
         encrypted_username: encrypted.encrypted_username,
         encrypted_password: encrypted.encrypted_password,
         encryption_iv: encrypted.encryption_iv,
-        is_valid: true, // Assume valid until a login attempt fails
+        encrypted_cvv: encrypted.encrypted_cvv || null,
+        is_valid: true,
         last_validated_at: null,
       },
       {
-        onConflict: "user_id,retailer",
+        onConflict: "user_id,retailer,label",
       }
     )
-    .select("id, retailer, is_valid, created_at, updated_at")
+    .select("id, retailer, is_valid, connection_status, connected_at, created_at, updated_at")
     .single();
 
   if (error) {

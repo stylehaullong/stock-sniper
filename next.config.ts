@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ["@browserbasehq/stagehand", "pino", "pino-pretty", "thread-stream"],
   experimental: {
     serverActions: {
       bodySizeLimit: "2mb",

@@ -56,9 +56,13 @@ export interface RetailerCredential {
   retailer: Retailer;
   encrypted_username: string;
   encrypted_password: string;
+  encrypted_cvv: string | null;
   encryption_iv: string;
   last_validated_at: string | null;
   is_valid: boolean;
+  connection_status: string;
+  connected_at: string | null;
+  browserbase_context_id: string | null;
   created_at: string;
   updated_at: string;
 }
