@@ -82,11 +82,18 @@ export default function CredentialsPage() {
         alert("Failed to start connection: " + (data.error || "Unknown error"));
         return;
       }
+      // Open live view immediately
       setLiveView({
         credentialId,
         sessionId: data.session_id,
         liveViewUrl: data.live_view_url,
       });
+      // Trigger auto-fill in background (separate API call so it doesn't block)
+      fetch("/api/credentials/connect/autofill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential_id: credentialId, session_id: data.session_id }),
+      }).catch((err) => console.error("Auto-fill failed:", err));
     } catch (err) {
       console.error("Connection error:", err);
     } finally {
@@ -389,7 +396,13 @@ function LiveViewModal({
   onComplete: () => void;
   onCancel: () => void;
 }) {
-  const [phase, setPhase] = useState<"manual" | "saving">("manual");
+  const [phase, setPhase] = useState<"auto_fill" | "manual" | "saving">("auto_fill");
+
+  useEffect(() => {
+    // Switch to manual phase after auto-fill should be done
+    const timer = setTimeout(() => setPhase("manual"), 15000);
+    return () => clearTimeout(timer);
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
@@ -398,6 +411,12 @@ function LiveViewModal({
         <div className="px-5 py-3 border-b border-[var(--color-border-default)] flex items-center justify-between">
           <div>
             <div className="text-sm font-semibold flex items-center gap-2">
+              {phase === "auto_fill" && (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  Auto-filling login...
+                </>
+              )}
               {phase === "manual" && (
                 <>
                   <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
@@ -412,7 +431,9 @@ function LiveViewModal({
               )}
             </div>
             <div className="text-[10px] text-[var(--color-text-muted)] font-[family-name:var(--font-mono)] mt-0.5">
-              {phase === "manual"
+              {phase === "auto_fill"
+                ? "We're entering your credentials automatically..."
+                : phase === "manual"
                 ? "If Target asks for a verification code, enter it in the browser below. Then click \"I'm Logged In\"."
                 : "Saving your authenticated session for future auto-buys..."
               }
