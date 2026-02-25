@@ -1,5 +1,4 @@
 import { Stagehand } from "@browserbasehq/stagehand";
-import { z } from "zod";
 import {
   getActivePlaybook,
   savePlaybook,
@@ -7,7 +6,7 @@ import {
   recordPlaybookFailure,
   replayPlaybook,
   recordAgentCheckout,
-} from "./playbook-engine"
+} from "./playbook-engine";
 
 // -- Types --
 
@@ -78,7 +77,7 @@ export async function executeAutoBuy(config: AutoBuyConfig): Promise<AutoBuyResu
 
       if (replayResult.success) {
         steps.push(...replayResult.steps_completed);
-        const confirmation = await extractConfirmation(page, stagehand);
+        const confirmation = await extractConfirmation(page);
 
         if (confirmation.confirmed) {
           await recordPlaybookSuccess(playbook.id);
@@ -333,7 +332,7 @@ RULES: Do NOT change address or payment. Click "Place your order" when visible. 
     await delay(3000, 4000);
 
     // Check confirmation
-    const confirmation = await extractConfirmation(page, stagehand);
+    const confirmation = await extractConfirmation(page);
     if (confirmation.confirmed) {
       steps.push("Order confirmed!");
       return {
@@ -368,8 +367,7 @@ RULES: Do NOT change address or payment. Click "Place your order" when visible. 
 // -- Confirmation Extraction --
 
 async function extractConfirmation(
-  page: any,
-  stagehand: Stagehand
+  page: any
 ): Promise<{ confirmed: boolean; orderNumber?: string; totalPrice?: number }> {
   const finalUrl = page.url();
 
@@ -387,7 +385,7 @@ async function extractConfirmation(
 
   // Check page text for confirmation keywords
   const text: string = await page.locator("body").innerText().catch(() => "");
-  const confirmPatterns = [/thanks for your order/i, /order has been placed/i, /order confirmed/i];
+  const confirmPatterns = [/thanks for your order/i, /order has been placed/i, /order confirmed/i, /order\s*#\s*\d{5,}/i];
   if (confirmPatterns.some((p) => p.test(text))) {
     const orderMatch = text.match(/order\s*#?\s*(\d{5,})/i) || text.match(/confirmation\s*#?\s*(\d{5,})/i);
     const totalMatch = text.match(/total[:\s]*\$(\d+\.?\d*)/i);
@@ -397,25 +395,6 @@ async function extractConfirmation(
       totalPrice: totalMatch ? parseFloat(totalMatch[1]) : undefined,
     };
   }
-
-  // AI fallback
-  try {
-    const analysis = await stagehand.extract({
-      instruction: "Is this an order confirmation page? Look for order number, 'thanks for your order', or confirmation message.",
-      schema: z.object({
-        is_confirmed: z.boolean().describe("Is this an order confirmation page?"),
-        order_number: z.string().nullable().describe("Order number if visible"),
-        total: z.string().nullable().describe("Order total if visible"),
-      }),
-    });
-    if (analysis.is_confirmed) {
-      return {
-        confirmed: true,
-        orderNumber: analysis.order_number || undefined,
-        totalPrice: analysis.total ? parseFloat(analysis.total.replace(/[^0-9.]/g, "")) : undefined,
-      };
-    }
-  } catch {}
 
   return { confirmed: false };
 }
