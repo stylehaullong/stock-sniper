@@ -105,6 +105,7 @@ async function autoFillLogin(
       apiKey: process.env.BROWSERBASE_API_KEY!,
       projectId: process.env.BROWSERBASE_PROJECT_ID!,
       verbose: 0,
+      logger: () => {},
       model: {
         modelName: "anthropic/claude-sonnet-4-20250514",
         apiKey: process.env.ANTHROPIC_API_KEY!,
