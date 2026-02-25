@@ -5,6 +5,8 @@ import { createContext, createSessionWithContext } from "@/lib/browserbase/conte
 import { Stagehand } from "@browserbasehq/stagehand";
 import { decryptCredentials } from "@/lib/encryption";
 
+export const maxDuration = 60; // Allow up to 60s for auto-fill + navigation
+
 /**
  * POST /api/credentials/connect
  * Start a browser session for the user to complete login + MFA.
@@ -62,15 +64,22 @@ export async function POST(req: NextRequest) {
       })
       .eq("id", credential_id);
 
-    // Launch Stagehand to auto-fill login on mobile site
-    // User handles MFA in live view if prompted
-    autoFillLogin(sessionId, cred.retailer, username, password)
-      .catch((err) => console.error("[Connect] Auto-fill error:", err.message));
+    // Navigate to login page before returning response
+    // (Vercel kills background tasks after response is sent)
+    let autoFillError: string | null = null;
+    try {
+      await autoFillLogin(sessionId, cred.retailer, username, password);
+    } catch (err: any) {
+      console.error("[Connect] Auto-fill error:", err.message);
+      autoFillError = err.message;
+      // Don't fail — user can still interact in live view
+    }
 
     return NextResponse.json({
       session_id: sessionId,
       live_view_url: liveViewUrl,
       context_id: contextId,
+      auto_fill_error: autoFillError,
     });
   } catch (error: any) {
     console.error("[Connect] Error:", error);

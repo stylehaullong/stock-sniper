@@ -67,7 +67,10 @@ export default function CredentialsPage() {
     }
   }
 
+  const [connecting, setConnecting] = useState(false);
+
   async function startConnection(credentialId: string) {
+    setConnecting(true);
     try {
       const res = await fetch("/api/credentials/connect", {
         method: "POST",
@@ -86,6 +89,8 @@ export default function CredentialsPage() {
       });
     } catch (err) {
       console.error("Connection error:", err);
+    } finally {
+      setConnecting(false);
     }
   }
 
@@ -179,9 +184,10 @@ export default function CredentialsPage() {
                     {saved.connection_status !== "connected" && (
                       <button
                         onClick={() => startConnection(saved.id)}
-                        className="px-2.5 py-1 rounded text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-wider text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition-colors"
+                        disabled={connecting}
+                        className="px-2.5 py-1 rounded text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-wider text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition-colors disabled:opacity-50"
                       >
-                        Reconnect
+                        {connecting ? "Connecting..." : "Reconnect"}
                       </button>
                     )}
                     <button
@@ -383,12 +389,7 @@ function LiveViewModal({
   onComplete: () => void;
   onCancel: () => void;
 }) {
-  const [phase, setPhase] = useState<"auto_fill" | "manual" | "saving">("auto_fill");
-
-  useEffect(() => {
-    const timer = setTimeout(() => setPhase("manual"), 12000);
-    return () => clearTimeout(timer);
-  }, []);
+  const [phase, setPhase] = useState<"manual" | "saving">("manual");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
@@ -397,12 +398,6 @@ function LiveViewModal({
         <div className="px-5 py-3 border-b border-[var(--color-border-default)] flex items-center justify-between">
           <div>
             <div className="text-sm font-semibold flex items-center gap-2">
-              {phase === "auto_fill" && (
-                <>
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                  Auto-filling login...
-                </>
-              )}
               {phase === "manual" && (
                 <>
                   <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
@@ -417,9 +412,7 @@ function LiveViewModal({
               )}
             </div>
             <div className="text-[10px] text-[var(--color-text-muted)] font-[family-name:var(--font-mono)] mt-0.5">
-              {phase === "auto_fill"
-                ? "We're entering your credentials automatically..."
-                : phase === "manual"
+              {phase === "manual"
                 ? "If Target asks for a verification code, enter it in the browser below. Then click \"I'm Logged In\"."
                 : "Saving your authenticated session for future auto-buys..."
               }
