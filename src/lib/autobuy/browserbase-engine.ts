@@ -7,7 +7,7 @@ import {
   recordPlaybookFailure,
   replayPlaybook,
   recordAgentCheckout,
-} from "./playbook-engine";
+} from "./playbook-engine"
 
 // -- Types --
 
