@@ -155,6 +155,7 @@ async function createBrowserSession(config: AutoBuyConfig): Promise<{
       },
       body: JSON.stringify({
         projectId: process.env.BROWSERBASE_PROJECT_ID!,
+        proxies: true,
         browserSettings: {
           context: { id: config.browserbase_context_id, persist: true },
           solveCaptchas: true,

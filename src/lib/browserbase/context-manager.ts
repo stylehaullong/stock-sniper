@@ -58,6 +58,7 @@ export async function createSessionWithContext(contextId: string): Promise<{
     body: JSON.stringify({
       projectId: process.env.BROWSERBASE_PROJECT_ID!,
       keepAlive: true,
+      proxies: true,
       browserSettings: {
         context: {
           id: contextId,
