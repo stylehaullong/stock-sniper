@@ -98,7 +98,6 @@ coverage/
 # Debug & Screenshots (from worker sessions)
 # ============================================================
 screenshots/
-debug/
 *.png
 *.jpg
 !src/app/**/opengraph-image.*
