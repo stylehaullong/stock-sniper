@@ -64,13 +64,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Tenant mismatch" }, { status: 403 });
     }
 
-    // Get credentials
-    const { data: creds } = await supabase
+    // Get credentials — prefer item's assigned credential, fallback to first for retailer
+    let credsQuery = supabase
       .from("retailer_credentials")
       .select("*")
       .eq("user_id", user_id)
-      .eq("retailer", item.retailer)
-      .single();
+      .eq("retailer", item.retailer);
+
+    if (item.credential_id) {
+      credsQuery = credsQuery.eq("id", item.credential_id);
+    }
+
+    const { data: credsList } = await credsQuery.limit(1);
+    const creds = credsList?.[0];
 
     if (!creds) {
       await updateAttempt(supabase, attempt_id, "failed", "No credentials saved");
@@ -78,16 +84,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Decrypt credentials
-    let username: string, password: string;
+    let username: string, password: string, cvv: string | undefined;
     try {
       const decrypted = decryptCredentials(
         creds.encrypted_username,
         creds.encrypted_password,
         creds.encryption_iv,
-        user_id
+        user_id,
+        creds.encrypted_cvv
       );
       username = decrypted.username;
       password = decrypted.password;
+      cvv = decrypted.cvv;
     } catch {
       await updateAttempt(supabase, attempt_id, "failed", "Failed to decrypt credentials");
       return NextResponse.json({ error: "Decryption failed" }, { status: 500 });
@@ -104,6 +112,8 @@ export async function POST(request: NextRequest) {
       retailer: item.retailer,
       username,
       password,
+      cvv,
+      browserbase_context_id: creds.browserbase_context_id || null,
     });
 
     // Map to valid DB status
